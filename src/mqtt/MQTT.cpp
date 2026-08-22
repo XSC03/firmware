@@ -157,6 +157,11 @@ inline void onReceiveProto(char *topic, byte *payload, size_t length)
         // likely they discovered each other via a channel we have downlink enabled for
         if (isToUs(p.get()) || (nodeInfoLiteHasUser(tx) && nodeInfoLiteHasUser(rx)))
             router->enqueueReceivedMessage(p.release());
+        else
+            // Dropping with no trace makes DM delivery failures (missing key exchange, wrong
+            // destination, stale nodeDB) look identical to network loss and very hard to debug.
+            LOG_WARN("Drop PKI packet from=0x%x to=0x%x: not to us and sender/receiver not both in nodeDB",
+                     getFrom(p.get()), p->to);
     } else if (router &&
                perhapsDecode(p.get()) == DecodeState::DECODE_SUCCESS) // ignore messages if we don't have the channel key
         router->enqueueReceivedMessage(p.release());

@@ -1583,7 +1583,7 @@ void AdminModule::handleGetDeviceConnectionStatus(const meshtastic_MeshPacket &r
 #ifdef ARCH_PORTDUINO
     conn.wifi.status.is_connected = true;
 #else
-    conn.wifi.status.is_connected = WiFi.status() == WL_CONNECTED;
+    conn.wifi.status.is_connected = (WiFi.localIP() != INADDR_NONE);
 #endif
     strncpy(conn.wifi.ssid, config.network.wifi_ssid, 33);
     if (conn.wifi.status.is_connected) {
