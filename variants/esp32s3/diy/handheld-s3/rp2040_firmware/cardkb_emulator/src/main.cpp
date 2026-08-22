@@ -20,8 +20,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include "Adafruit_TinyUSB.h"
-#include "pio_usb.h"
+#include <Adafruit_TinyUSB.h>
 
 // ─── I2C config ───────────────────────────────────────────────────────────────
 #define I2C_SDA_PIN     4
@@ -185,10 +184,7 @@ void loop() {
 
 // ─── Core1: USB Host init ────────────────────────────────────────────────────
 void setup1() {
-    pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
-    pio_cfg.pin_dp = 0;   // D+ on GPIO0, D- on GPIO1
-    tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
-    USBHost.begin(1);
+    USBHost.begin(0); // GPIO0/1 set via FQBN pio_usb_dp_pin
 }
 
 void loop1() {

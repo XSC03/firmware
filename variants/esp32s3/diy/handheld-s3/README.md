@@ -125,8 +125,9 @@ variants/esp32s3/diy/handheld-s3/
 └── README.md
 ```
 
-> **No core Meshtastic files are patched.**
-> `PacketAPI.cpp` is included from this folder via `build_src_filter`; the original is excluded.
+> **One core file is patched:** `src/mesh/api/PacketAPI.cpp` — the `#ifndef ARCH_PORTDUINO` guard is
+> extended to also skip BT programming-mode when `DISABLE_MUI_PROGRAMMING_MODE` is defined.
+> The change is ifdef-guarded and does not affect any other build target.
 
 ---
 

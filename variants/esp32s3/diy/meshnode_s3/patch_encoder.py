@@ -21,21 +21,20 @@ def patch_encoder_iram(source, target, env):
 
         new_init = """#ifdef INPUTDRIVER_ENCODER_LEFT
         pinMode(INPUTDRIVER_ENCODER_LEFT, INPUT_PULLUP);
-        attachInterrupt(INPUTDRIVER_ENCODER_LEFT, intLeftHandler, FALLING);
+        attachInterrupt(INPUTDRIVER_ENCODER_LEFT, intLeftHandler, CHANGE);
 #endif
 #ifdef INPUTDRIVER_ENCODER_RIGHT
         pinMode(INPUTDRIVER_ENCODER_RIGHT, INPUT_PULLUP);
         // Do not attach interrupt on RIGHT pin, it is only read as phase B
 #endif"""
 
-        # Wire up BTN interrupt (upstream only calls pinMode, no attachInterrupt for BTN)
+        # Set button to INPUT_PULLUP; button is polled in getInputData(), no ISR needed
         old_btn_init_no_irq = """#ifdef INPUTDRIVER_ENCODER_BTN
         pinMode(INPUTDRIVER_ENCODER_BTN, INPUT);
 #endif"""
 
         new_btn_init_with_irq = """#ifdef INPUTDRIVER_ENCODER_BTN
         pinMode(INPUTDRIVER_ENCODER_BTN, INPUT_PULLUP);
-        attachInterrupt(INPUTDRIVER_ENCODER_BTN, intPressHandler, FALLING);
 #endif"""
 
         # Pattern A: library without IRAM_ATTR (old upstream)
@@ -52,16 +51,18 @@ def patch_encoder_iram(source, target, env):
 
         new_isr_left = """void IRAM_ATTR EncoderInputDriver::intLeftHandler()
 {
-    static uint64_t lastInterruptTime = 0;
-    uint64_t interruptTime = esp_timer_get_time();
-    if (interruptTime - lastInterruptTime > 30000) { // 30ms debounce
-        if (digitalRead(INPUTDRIVER_ENCODER_RIGHT)) {
-            action = TB_ACTION_DOWN;
-        } else {
-            action = TB_ACTION_UP;
-        }
-        lastInterruptTime = interruptTime;
-    }
+    // Quadrature accumulator — fires on both CLK edges.
+    // Bounce reverses the accumulator back toward zero, so real detents
+    // (two consistent half-steps) reach ±2 and emit an action; glitches don't.
+    // No timer needed: this is inherently debounced by the physics of the signal.
+    static int8_t acc = 0;
+    bool clk = (bool)digitalRead(INPUTDRIVER_ENCODER_LEFT);
+    bool dt  = (bool)digitalRead(INPUTDRIVER_ENCODER_RIGHT);
+    // Falling CLK: CW if DT=HIGH, CCW if DT=LOW
+    // Rising  CLK: CW if DT=LOW,  CCW if DT=HIGH
+    acc += (clk ^ dt) ? 1 : -1;
+    if (acc >= 2)       { acc = 0; action = TB_ACTION_DOWN; }
+    else if (acc <= -2) { acc = 0; action = TB_ACTION_UP;   }
 }"""
 
         # Pattern A: library without IRAM_ATTR (old upstream)
@@ -121,55 +122,52 @@ def patch_encoder_iram(source, target, env):
         }"""
 
         new_btn_read = """#ifdef INPUTDRIVER_ENCODER_BTN
-        bool pinHeld = !digitalRead(INPUTDRIVER_ENCODER_BTN); // LOW = pressed (INPUT_PULLUP)
+        // Poll button (INPUT_PULLUP: LOW = pressed).
+        // On release, decide short vs long press and route through action so the
+        // existing pressed→released state machine (prevkey/else branch) works correctly.
+        bool pinHeld = !digitalRead(INPUTDRIVER_ENCODER_BTN);
         uint32_t now = millis();
         if (pinHeld && !btnWasHeld) {
-            // Falling edge detected by polling
             btnPressTime = now;
-            btnWasHeld = true;
+            btnWasHeld   = true;
         } else if (!pinHeld && btnWasHeld) {
-            // Rising edge - button released, decide action
             uint32_t held = now - btnPressTime;
-            btnWasHeld = false;
+            btnWasHeld    = false;
             if (held >= 600) {
-                // Long press -> back
-                data->key   = LV_KEY_ESC;
-                data->state = LV_INDEV_STATE_PRESSED;
-                prevkey = LV_KEY_ESC;
+                action = TB_ACTION_LEFT;    // long press -> ESC/back
             } else if (held >= 20) {
-                // Short press -> select
-                data->key   = LV_KEY_ENTER;
-                data->state = LV_INDEV_STATE_PRESSED;
-                prevkey = LV_KEY_ENTER;
+                action = TB_ACTION_PRESSED; // short press -> ENTER
             }
-            // else: < 20 ms, ignore as noise
+            // < 20 ms: noise, ignore
         }
 #endif
 
-        // slow down repeating key to max. four events per second
-        if (action != TB_ACTION_NONE && millis() > lastPressed + 250) {
-            if (action == TB_ACTION_UP) {
+        if (action != TB_ACTION_NONE &&
+            (action == TB_ACTION_PRESSED || action == TB_ACTION_LEFT || millis() > lastPressed + 100)) {
+            if (action == TB_ACTION_PRESSED) {
+                data->key   = LV_KEY_ENTER;
+                data->state = LV_INDEV_STATE_PRESSED;
+            } else if (action == TB_ACTION_UP) {
                 data->enc_diff = -1;
             } else if (action == TB_ACTION_DOWN) {
                 data->enc_diff = 1;
             } else if (action == TB_ACTION_LEFT) {
-                data->key = LV_KEY_DOWN; // slider widget reacts on UP/DOWN
+                data->key   = LV_KEY_ESC;
                 data->state = LV_INDEV_STATE_PRESSED;
-                prevkey = LV_KEY_DOWN;
             } else if (action == TB_ACTION_RIGHT) {
-                data->key = LV_KEY_UP; // slider widget reacts on UP/DOWN
+                data->key   = LV_KEY_UP;
                 data->state = LV_INDEV_STATE_PRESSED;
-                prevkey = LV_KEY_UP;
             }
 
             lastPressed = millis();
-            action = TB_ACTION_NONE;
+            prevkey = data->key;
+            action  = TB_ACTION_NONE;
         } else {
             // this logic is required for LONG_PRESSED event, see lv_indev.c
             if (prevkey != 0) {
                 data->state = LV_INDEV_STATE_RELEASED;
-                data->key = prevkey;
-                prevkey = 0;
+                data->key   = prevkey;
+                prevkey     = 0;
             }
         }"""
 
@@ -207,7 +205,7 @@ def patch_encoder_iram(source, target, env):
                 changed = True
                 
         if changed:
-            print(f"Patched {filepath_enc} with Quadrature Encoder decoding, IRAM_ATTR, and short-press fix")
+            print(f"Patched {filepath_enc}: CHANGE-edge quadrature accumulator, IRAM_ATTR, short-press fix")
             with open(filepath_enc, 'w', encoding='utf-8') as f:
                 f.write(content)
 
@@ -283,7 +281,43 @@ def patch_encoder_iram(source, target, env):
             with open(filepath_drop, 'w', encoding='utf-8') as f:
                 f.write(content)
 
-    # 3. Patch TFTDisplay.cpp for custom rotation orientation and offset_rotation
+    # 3. Patch ServerAPI.cpp — reduce TCP idle timeout from 15 min to 3 min.
+    # Upstream: timeout only starts counting after first data packet (lastContactMsec > 0).
+    # With keepalive now enabled in sdkconfig (dead sockets detected in ~45s), this is a
+    # software fallback for the rare case where the socket looks alive but no data ever flows.
+    filepath_server = env.subst("$PROJECT_DIR/src/mesh/api/ServerAPI.cpp")
+    if os.path.exists(filepath_server):
+        with open(filepath_server, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        old_timeout = "static constexpr uint32_t TCP_IDLE_TIMEOUT_MS = 15 * 60 * 1000UL;"
+        new_timeout = "static constexpr uint32_t TCP_IDLE_TIMEOUT_MS = 3 * 60 * 1000UL;"
+
+        if old_timeout in content and new_timeout not in content:
+            content = content.replace(old_timeout, new_timeout)
+            print(f"Patched {filepath_server}: TCP idle timeout 15min → 3min")
+            with open(filepath_server, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+    # 4. Patch AdminModule.cpp — use IP presence instead of WL_CONNECTED for WiFi status.
+    # WiFi.status() == WL_CONNECTED returns false for 2-3s during MQTT-triggered WiFi reconnects.
+    # The device-ui polls every 10s, so a poll landing in that window shows "no signal" even
+    # though WiFi is functionally up. WiFi.localIP() holds its address through brief reconnects.
+    filepath_admin = env.subst("$PROJECT_DIR/src/modules/AdminModule.cpp")
+    if os.path.exists(filepath_admin):
+        with open(filepath_admin, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        old_wifi_check = "    conn.wifi.status.is_connected = WiFi.status() == WL_CONNECTED;"
+        new_wifi_check = "    conn.wifi.status.is_connected = (WiFi.localIP() != INADDR_NONE);"
+
+        if old_wifi_check in content and new_wifi_check not in content:
+            content = content.replace(old_wifi_check, new_wifi_check)
+            print(f"Patched {filepath_admin}: WiFi connected check uses localIP() not WL_CONNECTED")
+            with open(filepath_admin, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+    # 5. Patch TFTDisplay.cpp for custom rotation orientation and offset_rotation
     filepath_tft = env.subst("$PROJECT_DIR/src/graphics/TFTDisplay.cpp")
     if os.path.exists(filepath_tft):
         with open(filepath_tft, 'r', encoding='utf-8') as f:
@@ -330,3 +364,5 @@ env.AddPreAction("$PROJECT_DIR/.pio/libdeps/${PIOENV}/meshtastic-device-ui/sourc
 env.AddPreAction("$PROJECT_DIR/.pio/libdeps/${PIOENV}/lvgl/src/widgets/dropdown/lv_dropdown.c.o", patch_encoder_iram)
 env.AddPreAction("$PROJECT_DIR/src/graphics/TFTDisplay.cpp", patch_encoder_iram)
 env.AddPreAction("$PROJECT_DIR/src/graphics/TFTDisplay.cpp.o", patch_encoder_iram)
+env.AddPreAction("$PROJECT_DIR/src/mesh/api/ServerAPI.cpp", patch_encoder_iram)
+env.AddPreAction("$PROJECT_DIR/src/mesh/api/ServerAPI.cpp.o", patch_encoder_iram)
