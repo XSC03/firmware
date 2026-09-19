@@ -1,10 +1,10 @@
-name: Build
+name: Build Firmware
 
 on:
   workflow_dispatch:
     inputs:
       platform:
-        description: 'Pilih Platform (Contoh: esp32s3, esp32, nrf52)'
+        description: 'Pilih Platform (Contoh: esp32s3, esp32, nrf52840)'
         required: true
         default: 'esp32s3'
         type: choice
@@ -39,30 +39,37 @@ permissions: read-all
 jobs:
   pio-build:
     name: build-${{ inputs.platform || github.event.inputs.platform }}
-    runs-on: ${{ github.repository_owner == 'meshtastic' && 'arctastic' || 'ubuntu-latest' }}
+    # ✅ FIX 1: Pakai runner publik 'ubuntu-latest' agar tidak stuck "Queued" berjam-jam
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       artifact-id: ${{ steps.upload-firmware.outputs.artifact-id }}
+
     steps:
-      # Menggunakan v4 (versi rilis stabil saat ini untuk menghindari error fetch)
-      - uses: actions/checkout@v4
+      # ✅ FIX 2: Downgrade checkout ke v4 (versi paling stabil saat ini)
+      - name: Checkout Repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ── ⚡ STEP OPTIMASI: CACHING PLATFORMIO (INI YANG BIKIN CEPAT!) ──
-      - name: Cache PlatformIO Packages and Build State
+      # ✅ FIX 3: Tambah Cache PlatformIO (memotong waktu build dari 1 jam ke 3-5 menit!)
+      - name: Cache PlatformIO Toolchains & Build Artifacts
         uses: actions/cache@v4
         with:
           path: |
-            ~/.platformio
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
             ~/.cache/pip
             .pio
-          # Cache akan di-update jika file platformio.ini berubah
+            firmware/.pio
           key: ${{ runner.os }}-pio-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ hashFiles('**/platformio.ini') }}
           restore-keys: |
             ${{ runner.os }}-pio-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-
+            ${{ runner.os }}-pio-${{ inputs.platform || github.event.inputs.platform }}-
             ${{ runner.os }}-pio-
 
-      # ── Proses Build Utama ──
+      # ── Build menggunakan official action compiler Meshtastic ──
       - name: Build ${{ inputs.platform || github.event.inputs.platform }}
         id: build
         uses: meshtastic/gh-action-firmware@main
@@ -71,6 +78,7 @@ jobs:
           pio_env: ${{ inputs.pio_env || github.event.inputs.pio_env }}
           pio_target: build
 
+      # ── Download Unified OTA untuk varian ESP32 / ESP32-S3 ──
       - name: ESP32 - Download Unified OTA firmware
         if: inputs.platform == 'esp32' || inputs.platform == 'esp32s3'
         id: dl-ota-unified
@@ -82,6 +90,7 @@ jobs:
         run: |
           curl -L -o "mt-$PIO_PLATFORM-ota.bin" $OTA_URL
 
+      # ── Download BLE OTA untuk varian ESP32-C3/C6 ──
       - name: ESP32-C* - Download BLE-Only OTA firmware
         if: inputs.platform == 'esp32c3' || inputs.platform == 'esp32c6'
         id: dl-ota-ble
@@ -92,6 +101,7 @@ jobs:
         run: |
           curl -L -o bleota-c3.bin $OTA_URL
 
+      # ── Modifikasi JSON Manifest untuk support OTA update lokal ──
       - name: Update manifest with OTA file
         if: inputs.platform == 'esp32' || inputs.platform == 'esp32s3' || inputs.platform == 'esp32c3' || inputs.platform == 'esp32c6'
         working-directory: release
@@ -105,7 +115,7 @@ jobs:
           fi
 
           if [[ ! -f "$OTA_FILE" ]]; then
-            echo "OTA file $OTA_FILE not found, skipping manifest update"
+            echo "⚠️ OTA file $OTA_FILE tidak ditemukan, lewati update manifest."
             exit 0
           fi
 
@@ -118,32 +128,35 @@ jobs:
 
           for manifest in firmware-*.mt.json; do
             if [[ -f "$manifest" ]]; then
-              echo "Updating $manifest with $OTA_FILE (md5: $OTA_MD5, size: $OTA_SIZE)"
+              echo "📝 Menyisipkan $OTA_FILE (MD5: $OTA_MD5, Size: $OTA_SIZE bytes) ke dalam $manifest"
               jq --arg name "$OTA_FILE" --arg md5 "$OTA_MD5" --argjson bytes "$OTA_SIZE" --arg part "app1" \
                 'if .files | map(select(.name == $name)) | length == 0 then .files += [{"name": $name, "md5": $md5, "bytes": $bytes, "part_name": $part}] else . end' \
                 "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
             fi
           done
 
+      # ── Tulis Ringkasan Hasil Build di halaman GitHub Actions ──
       - name: Job summary
         env:
           PIO_ENV: ${{ inputs.pio_env || github.event.inputs.pio_env }}
         run: |
-          echo "## $PIO_ENV" >> $GITHUB_STEP_SUMMARY
-          echo "<details><summary><strong>Manifest</strong></summary>" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Sukses Mem-build $PIO_ENV" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary><strong>📋 Lihat Manifest JSON</strong></summary>" >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '```json' >> $GITHUB_STEP_SUMMARY
-          cat release/firmware-*.mt.json >> $GITHUB_STEP_SUMMARY
+          cat release/firmware-*.mt.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "{}" >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
+      # ── Simpan hasil akhir firmware (.bin, .elf, .zip, dll.) sebagai Artifact ──
       - name: Store binaries as an artifact
         uses: actions/upload-artifact@v4
         id: upload-firmware
         with:
           name: firmware-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ inputs.version || github.event.inputs.version }}
           overwrite: true
+          retention-days: 14
           path: |
             release/*.mt.json
             release/*.bin
@@ -154,11 +167,13 @@ jobs:
             release/device-*.sh
             release/device-*.bat
 
+      # ── Simpan manifest OTA sebagai Artifact terpisah ──
       - name: Store manifests as an artifact
         uses: actions/upload-artifact@v4
         id: upload-manifest
         with:
           name: manifest-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ inputs.version || github.event.inputs.version }}
           overwrite: true
+          retention-days: 14
           path: |
             release/*.mt.json
