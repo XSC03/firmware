@@ -1,6 +1,27 @@
 name: Build
 
 on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Pilih Platform (Contoh: esp32s3, esp32, nrf52)'
+        required: true
+        default: 'esp32s3'
+        type: choice
+        options:
+          - esp32s3
+          - esp32
+          - nrf52840
+      pio_env:
+        description: 'Masukkan Nama Board (Contoh: handheld-s3-32in atau heltec-v3)'
+        required: true
+        default: 'handheld-s3-32in'
+        type: string
+      version:
+        description: 'Versi Firmware (Bebas)'
+        required: true
+        default: '2.8.1-custom'
+        type: string
   workflow_call:
     inputs:
       version:
@@ -17,7 +38,7 @@ permissions: read-all
 
 jobs:
   pio-build:
-    name: build-${{ inputs.platform }}
+    name: build-${{ inputs.platform || github.event.inputs.platform }}
     # Use 'arctastic' self-hosted runner pool when building in the main repo
     runs-on: ${{ github.repository_owner == 'meshtastic' && 'arctastic' || 'ubuntu-latest' }}
     outputs:
@@ -27,12 +48,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build ${{ inputs.platform }}
+      - name: Build ${{ inputs.platform || github.event.inputs.platform }}
         id: build
         uses: meshtastic/gh-action-firmware@main
         with:
-          pio_platform: ${{ inputs.platform }}
-          pio_env: ${{ inputs.pio_env }}
+          pio_platform: ${{ inputs.platform || github.event.inputs.platform }}
+          pio_env: ${{ inputs.pio_env || github.event.inputs.pio_env }}
           pio_target: build
 
       - name: ESP32 - Download Unified OTA firmware
@@ -40,9 +61,9 @@ jobs:
         if: inputs.platform == 'esp32' || inputs.platform == 'esp32s3'
         id: dl-ota-unified
         env:
-          PIO_PLATFORM: ${{ inputs.platform }}
-          PIO_ENV: ${{ inputs.pio_env }}
-          OTA_URL: https://github.com/meshtastic/esp32-unified-ota/releases/latest/download/mt-${{ inputs.platform }}-ota.bin
+          PIO_PLATFORM: ${{ inputs.platform || github.event.inputs.platform }}
+          PIO_ENV: ${{ inputs.pio_env || github.event.inputs.pio_env }}
+          OTA_URL: https://github.com/meshtastic/esp32-unified-ota/releases/latest/download/mt-${{ inputs.platform || github.event.inputs.platform }}-ota.bin
         working-directory: release
         run: |
           curl -L -o "mt-$PIO_PLATFORM-ota.bin" $OTA_URL
@@ -51,7 +72,7 @@ jobs:
         if: inputs.platform == 'esp32c3' || inputs.platform == 'esp32c6'
         id: dl-ota-ble
         env:
-          PIO_ENV: ${{ inputs.pio_env }}
+          PIO_ENV: ${{ inputs.pio_env || github.event.inputs.pio_env }}
           OTA_URL: https://github.com/meshtastic/firmware-ota/releases/latest/download/firmware-c3.bin
         working-directory: release
         run: |
@@ -61,7 +82,7 @@ jobs:
         if: inputs.platform == 'esp32' || inputs.platform == 'esp32s3' || inputs.platform == 'esp32c3' || inputs.platform == 'esp32c6'
         working-directory: release
         env:
-          PIO_PLATFORM: ${{ inputs.platform }}
+          PIO_PLATFORM: ${{ inputs.platform || github.event.inputs.platform }}
         run: |
           # Determine OTA filename based on platform
           if [[ "$PIO_PLATFORM" == "esp32" || "$PIO_PLATFORM" == "esp32s3" ]]; then
@@ -97,7 +118,7 @@ jobs:
 
       - name: Job summary
         env:
-          PIO_ENV: ${{ inputs.pio_env }}
+          PIO_ENV: ${{ inputs.pio_env || github.event.inputs.pio_env }}
         run: |
           echo "## $PIO_ENV" >> $GITHUB_STEP_SUMMARY
           echo "<details><summary><strong>Manifest</strong></summary>" >> $GITHUB_STEP_SUMMARY
@@ -112,7 +133,7 @@ jobs:
         uses: actions/upload-artifact@v7
         id: upload-firmware
         with:
-          name: firmware-${{ inputs.platform }}-${{ inputs.pio_env }}-${{ inputs.version }}
+          name: firmware-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ inputs.version || github.event.inputs.version }}
           overwrite: true
           path: |
             release/*.mt.json
@@ -128,7 +149,7 @@ jobs:
         uses: actions/upload-artifact@v7
         id: upload-manifest
         with:
-          name: manifest-${{ inputs.platform }}-${{ inputs.pio_env }}-${{ inputs.version }}
+          name: manifest-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ inputs.version || github.event.inputs.version }}
           overwrite: true
           path: |
             release/*.mt.json
