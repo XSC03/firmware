@@ -39,15 +39,30 @@ permissions: read-all
 jobs:
   pio-build:
     name: build-${{ inputs.platform || github.event.inputs.platform }}
-    # Use 'arctastic' self-hosted runner pool when building in the main repo
     runs-on: ${{ github.repository_owner == 'meshtastic' && 'arctastic' || 'ubuntu-latest' }}
     outputs:
       artifact-id: ${{ steps.upload-firmware.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v7
+      # Menggunakan v4 (versi rilis stabil saat ini untuk menghindari error fetch)
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      # ── ⚡ STEP OPTIMASI: CACHING PLATFORMIO (INI YANG BIKIN CEPAT!) ──
+      - name: Cache PlatformIO Packages and Build State
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+            .pio
+          # Cache akan di-update jika file platformio.ini berubah
+          key: ${{ runner.os }}-pio-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-
+            ${{ runner.os }}-pio-
+
+      # ── Proses Build Utama ──
       - name: Build ${{ inputs.platform || github.event.inputs.platform }}
         id: build
         uses: meshtastic/gh-action-firmware@main
@@ -57,7 +72,6 @@ jobs:
           pio_target: build
 
       - name: ESP32 - Download Unified OTA firmware
-        # Currently only esp32 and esp32s3 use the unified ota
         if: inputs.platform == 'esp32' || inputs.platform == 'esp32s3'
         id: dl-ota-unified
         env:
@@ -84,20 +98,17 @@ jobs:
         env:
           PIO_PLATFORM: ${{ inputs.platform || github.event.inputs.platform }}
         run: |
-          # Determine OTA filename based on platform
           if [[ "$PIO_PLATFORM" == "esp32" || "$PIO_PLATFORM" == "esp32s3" ]]; then
             OTA_FILE="mt-${PIO_PLATFORM}-ota.bin"
           else
             OTA_FILE="bleota-c3.bin"
           fi
 
-          # Check if OTA file exists
           if [[ ! -f "$OTA_FILE" ]]; then
             echo "OTA file $OTA_FILE not found, skipping manifest update"
             exit 0
           fi
 
-          # Calculate MD5 and size
           if command -v md5sum &> /dev/null; then
             OTA_MD5=$(md5sum "$OTA_FILE" | cut -d' ' -f1)
           else
@@ -105,11 +116,9 @@ jobs:
           fi
           OTA_SIZE=$(stat -f%z "$OTA_FILE" 2>/dev/null || stat -c%s "$OTA_FILE")
 
-          # Find and update manifest file
           for manifest in firmware-*.mt.json; do
             if [[ -f "$manifest" ]]; then
               echo "Updating $manifest with $OTA_FILE (md5: $OTA_MD5, size: $OTA_SIZE)"
-              # Add OTA entry to files array if not already present
               jq --arg name "$OTA_FILE" --arg md5 "$OTA_MD5" --argjson bytes "$OTA_SIZE" --arg part "app1" \
                 'if .files | map(select(.name == $name)) | length == 0 then .files += [{"name": $name, "md5": $md5, "bytes": $bytes, "part_name": $part}] else . end' \
                 "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
@@ -130,7 +139,7 @@ jobs:
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
       - name: Store binaries as an artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         id: upload-firmware
         with:
           name: firmware-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ inputs.version || github.event.inputs.version }}
@@ -146,7 +155,7 @@ jobs:
             release/device-*.bat
 
       - name: Store manifests as an artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         id: upload-manifest
         with:
           name: manifest-${{ inputs.platform || github.event.inputs.platform }}-${{ inputs.pio_env || github.event.inputs.pio_env }}-${{ inputs.version || github.event.inputs.version }}
